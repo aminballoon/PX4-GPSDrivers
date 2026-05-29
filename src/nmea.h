@@ -67,6 +67,7 @@ public:
 
 	int receive(unsigned timeout) override;
 	int configure(unsigned &baudrate, const GPSConfig &config) override;
+	void printDriverStatus() override;
 
 private:
 	void handleHeading(float heading_deg, float heading_stddev_deg);
@@ -74,6 +75,7 @@ private:
 
 	UnicoreParser _unicore_parser;
 	gps_abstime _unicore_heading_received_last;
+	uint8_t _sat_info_write_idx{0}; // running write index across multi-constellation GSV messages
 
 	enum class NMEADecodeState {
 		uninit,
@@ -92,18 +94,63 @@ private:
 
 	sensor_gps_s *_gps_position {nullptr};
 	satellite_info_s *_satellite_info {nullptr};
+
+	// UM982 Antenna 2 (slave) satellite info — populated from GPGSVH messages
+	satellite_info_s _satellite_info_ant2 {};
+	int _sat_num_ant2_gsvs  {0}; // total (sum of per-constellation below)
+	int _sat_num_ant2_gpgsvh{0}; // GPS
+	int _sat_num_ant2_glgsvh{0}; // GLONASS
+	int _sat_num_ant2_gagsvh{0}; // Galileo
+	int _sat_num_ant2_gbgsvh{0}; // BeiDou ($GB prefix)
+	int _sat_num_ant2_gqgsvh{0}; // QZSS
+	gps_abstime _ant2_health_log_last {0};
+
+	// Ant2 auxiliary fields from GPGGAH / GPGSTH / GPGSAH
+	uint8_t _ant2_fix_quality {0};
+	uint8_t _ant2_sat_num     {0};
+	float   _ant2_eph         {0.f};
+	float   _ant2_epv         {0.f};
+	uint8_t _ant2_fix_mode    {0};
+
+	// Per-message NMEA rate monitoring
+	struct NmeaMsgRate {
+		uint16_t count {0};
+		float    rate  {0.f};
+	};
+	NmeaMsgRate _nmea_rate_gga  {};
+	NmeaMsgRate _nmea_rate_agrica {};
+	NmeaMsgRate _nmea_rate_head {};
+	NmeaMsgRate _nmea_rate_gst  {};
+	NmeaMsgRate _nmea_rate_gsa  {};
+	NmeaMsgRate _nmea_rate_rmc  {};
+	NmeaMsgRate _nmea_rate_zda  {};
+	NmeaMsgRate _nmea_rate_gsv  {};
+	NmeaMsgRate _nmea_rate_gsvh {};
+	NmeaMsgRate _nmea_rate_ggah {};
+	NmeaMsgRate _nmea_rate_gsth {};
+	NmeaMsgRate _nmea_rate_gsah {};
+	gps_abstime _nmea_rate_last_print {0};
 	double _last_POS_timeUTC{0};
 	double _last_VEL_timeUTC{0};
 	uint64_t _last_timestamp_time{0};
 
 	uint8_t _sat_num_gga{0};
 	uint8_t _sat_num_gns{0};
-	uint8_t _sat_num_gsv{0};
+	uint8_t _sat_num_gsv{0};       // physical sats (signal-deduped)
+	uint16_t _sat_num_gsv_raw{0};  // all signal bands combined (no dedup) → feeds satellites_visible
+	uint16_t _sat_num_gsv_raw_by_cid[7]{}; // per-constellation raw (0=GP 1=GL 2=GA 3=GB 4=GQ 5=BD 6=GN)
 	uint8_t _sat_num_gpgsv{0};
 	uint8_t _sat_num_glgsv{0};
 	uint8_t _sat_num_gagsv{0};
 	uint8_t _sat_num_gbgsv{0};
 	uint8_t _sat_num_bdgsv{0};
+	uint8_t _sat_num_gqgsv{0}; // QZSS
+
+	// Minimum Signal ID seen per constellation (index: 0=GP 1=GL 2=GA 3=GB 4=GQ 5=BD)
+	// Used to count physical satellites once even when receiver sends one GSV per signal band
+	uint8_t _gsv_min_sid[6]  {255, 255, 255, 255, 255, 255}; // Ant1 physical dedup
+	uint8_t _gsv_raw_min_sid[7] {255,255,255,255,255,255,255}; // Ant1 raw per-epoch reset
+	uint8_t _gsvh_min_sid[6] {255, 255, 255, 255, 255, 255}; // Ant2
 
 	bool _clock_set {false};
 

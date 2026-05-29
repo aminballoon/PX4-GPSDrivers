@@ -244,6 +244,12 @@ public:
 	void storeUpdateRates();
 
 	/**
+	 * Print driver-specific status lines (called from gps status command).
+	 * Default implementation does nothing; drivers may override to add extra info.
+	 */
+	virtual void printDriverStatus() {}
+
+	/**
 	 * Allow a driver to disable RTCM injection
 	 */
 	virtual bool shouldInjectRTCM() { return true; }

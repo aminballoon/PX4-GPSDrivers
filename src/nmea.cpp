@@ -56,6 +56,7 @@
 #endif
 
 #define MAX(X,Y)    ((X) > (Y) ? (X) : (Y))
+#define MIN(X,Y)    ((X) < (Y) ? (X) : (Y))
 #define NMEA_UNUSED(x) (void)x;
 
 /**** Warning macros, disable to save memory */
@@ -185,6 +186,7 @@ int GPSDriverNMEA::handleMessage(int len)
 #endif
 		_last_timestamp_time = gps_absolute_time();
 		_TIME_received = true;
+		_nmea_rate_zda.count++;
 
 	} else if ((memcmp(_rx_buffer + 3, "GLL,", 4) == 0) && (fieldCount >= 7)) {
 		/*
@@ -337,7 +339,7 @@ int GPSDriverNMEA::handleMessage(int len)
 			_gps_position->fix_type = 3 + fix_quality - 1;
 		}
 
-		if (!_POS_received && (_last_POS_timeUTC < utc_time)) {
+		if (fix_quality > 0 && !_POS_received && (_last_POS_timeUTC < utc_time)) {
 			_last_POS_timeUTC = utc_time;
 			_gps_position->timestamp = gps_absolute_time();
 			_POS_received = true;
@@ -347,8 +349,8 @@ int GPSDriverNMEA::handleMessage(int len)
 		_ALT_received = true;
 		_SVNUM_received = true;
 		_FIX_received = true;
-
 		_gps_position->c_variance_rad = 0.1f;
+		_nmea_rate_gga.count++;
 
 	} else if (memcmp(_rx_buffer + 3, "HDT,", 4) == 0 && fieldCount == 2) {
 		/*
@@ -367,6 +369,7 @@ int GPSDriverNMEA::handleMessage(int len)
 		}
 
 		_HEAD_received = true;
+		_nmea_rate_head.count++;
 
 	} else if ((memcmp(_rx_buffer + 3, "GNS,", 4) == 0) && (fieldCount >= 12)) {
 
@@ -617,6 +620,7 @@ int GPSDriverNMEA::handleMessage(int len)
 
 		_last_timestamp_time = gps_absolute_time();
 		_TIME_received = true;
+		_nmea_rate_rmc.count++;
 
 	}	else if ((memcmp(_rx_buffer + 3, "GST,", 4) == 0) && (fieldCount == 8)) {
 
@@ -677,6 +681,7 @@ int GPSDriverNMEA::handleMessage(int len)
 		_gps_position->epv = static_cast<float>(alt_err);
 
 		_EPH_received = true;
+		_nmea_rate_gst.count++;
 
 	} else if ((memcmp(_rx_buffer + 3, "GSA,", 4) == 0) && (fieldCount >= 17)) {
 
@@ -731,6 +736,7 @@ int GPSDriverNMEA::handleMessage(int len)
 			_DOP_received = true;
 
 		}
+		_nmea_rate_gsa.count++;
 
 
 	} else if ((memcmp(_rx_buffer + 3, "GSV,", 4) == 0)) {
@@ -773,29 +779,41 @@ int GPSDriverNMEA::handleMessage(int len)
 			return 0;
 		}
 
-		if (memcmp(_rx_buffer, "$GP", 3) == 0) {
-			_sat_num_gpgsv = tot_sv_visible;
+		// Determine constellation index (0=GP 1=GL 2=GA 3=GB 4=GQ 5=BD)
+		int gsv_cidx = -1;
+		if      (memcmp(_rx_buffer, "$GP", 3) == 0) { gsv_cidx = 0; }
+		else if (memcmp(_rx_buffer, "$GL", 3) == 0) { gsv_cidx = 1; }
+		else if (memcmp(_rx_buffer, "$GA", 3) == 0) { gsv_cidx = 2; }
+		else if (memcmp(_rx_buffer, "$GB", 3) == 0) { gsv_cidx = 3; }
+		else if (memcmp(_rx_buffer, "$GQ", 3) == 0) { gsv_cidx = 4; }
+		else if (memcmp(_rx_buffer, "$BD", 3) == 0) { gsv_cidx = 5; }
 
-		} else if (memcmp(_rx_buffer, "$GL", 3) == 0) {
-			_sat_num_glgsv = tot_sv_visible;
-
-		} else if (memcmp(_rx_buffer, "$GA", 3) == 0) {
-			_sat_num_gagsv = tot_sv_visible;
-
-		} else if (memcmp(_rx_buffer, "$GB", 3) == 0) {
-			_sat_num_gbgsv = tot_sv_visible;
-
-		} else if (memcmp(_rx_buffer, "$BD", 3) == 0) {
-			_sat_num_bdgsv = tot_sv_visible;
-
+		// Extract Signal ID (last field before '*') for ALL pages.
+		// UM982 sends one GSV message sequence per signal band (L1=1, L5=4/6, etc.)
+		// for the same physical satellites. signal_id=1 → primary band.
+		// signal_id=0 → empty field (no-sat message). signal_id=255 → not found.
+		int signal_id = 255;
+		{
+			const char *star = (const char *)memchr(_rx_buffer, '*', _rx_buffer_bytes + 1);
+			if (star) {
+				const char *q = star - 1;
+				while (q > (const char *)_rx_buffer && *q != ',') { --q; }
+				if (*q == ',') { signal_id = (int)strtol(q + 1, nullptr, 10); }
+			}
 		}
 
-		if (this_page_num == 0 && _satellite_info) {
+		// Reset satellite array at true epoch start:
+		// GPGSV (GPS, gsv_cidx==0) page 1 of PRIMARY signal band (signal_id≤1).
+		// signal_id=1 → primary L1/CA. signal_id=0 → empty (no sats). Both are epoch start.
+		// Higher signal IDs (L5, L2, B3I …) are secondary bands for the same physical
+		// satellites — do NOT reset on those, they would wipe the primary-band data.
+		if (this_page_num == 1 && gsv_cidx == 0 && signal_id <= 1 && _satellite_info) {
 			memset(_satellite_info->svid,     0, sizeof(_satellite_info->svid));
 			memset(_satellite_info->used,     0, sizeof(_satellite_info->used));
 			memset(_satellite_info->snr,      0, sizeof(_satellite_info->snr));
 			memset(_satellite_info->elevation, 0, sizeof(_satellite_info->elevation));
 			memset(_satellite_info->azimuth,  0, sizeof(_satellite_info->azimuth));
+			_sat_info_write_idx = 0;
 		}
 
 		int end = 4;
@@ -805,16 +823,53 @@ int GPSDriverNMEA::handleMessage(int len)
 
 			_SVNUM_received = true;
 			_SVINFO_received = true;
+			_nmea_rate_gsv.count++;
+
+			// Determine extended cidx: add GN (combined) as index 6
+			int gsv_cidx_ext = gsv_cidx;
+			if (gsv_cidx_ext < 0 && memcmp(_rx_buffer, "$GN", 3) == 0) { gsv_cidx_ext = 6; }
+
+			// Per-constellation raw accumulation with min_sid-based epoch detection.
+			// When signal_id <= previous minimum → new epoch: reset this constellation's raw count.
+			// When signal_id > minimum → additional band same epoch: accumulate.
+			if (gsv_cidx_ext >= 0) {
+				if (signal_id <= (int)_gsv_raw_min_sid[gsv_cidx_ext]) {
+					_gsv_raw_min_sid[gsv_cidx_ext] = (uint8_t)signal_id;
+					_sat_num_gsv_raw_by_cid[gsv_cidx_ext] = (uint16_t)tot_sv_visible;
+				} else {
+					_sat_num_gsv_raw_by_cid[gsv_cidx_ext] += (uint16_t)tot_sv_visible;
+				}
+				_sat_num_gsv_raw = 0;
+				for (int k = 0; k < 7; k++) { _sat_num_gsv_raw += _sat_num_gsv_raw_by_cid[k]; }
+			}
+
+			if (gsv_cidx >= 0 && signal_id <= _gsv_min_sid[gsv_cidx]) {
+				_gsv_min_sid[gsv_cidx] = (uint8_t)signal_id;
+				switch (gsv_cidx) {
+				case 0: _sat_num_gpgsv = (uint8_t)tot_sv_visible; break;
+				case 1: _sat_num_glgsv = (uint8_t)tot_sv_visible; break;
+				case 2: _sat_num_gagsv = (uint8_t)tot_sv_visible; break;
+				case 3: _sat_num_gbgsv = (uint8_t)tot_sv_visible; break;
+				case 4: _sat_num_gqgsv = (uint8_t)tot_sv_visible; break;
+				case 5: _sat_num_bdgsv = (uint8_t)tot_sv_visible; break;
+				}
+			}
 
 			if (_satellite_info) {
-				_satellite_info->count = satellite_info_s::SAT_INFO_MAX_SATELLITES;
 				_satellite_info->timestamp = gps_absolute_time();
-				ret |= 2;
+				ret |= 2; // publish after each constellation finishes; count grows as more arrive
 			}
 		}
 
-		if (_satellite_info) {
+		// Write satellite data only for primary signal band (signal_id≤1).
+		// Secondary bands (L5, L2, B3I…) carry the same physical satellites — skip them
+		// to avoid duplicates and avoid writing into wrong array slots.
+		if (_satellite_info && signal_id <= 1) {
 			for (int y = 0 ; y < end ; y++) {
+				// Use running write index so multi-constellation sats accumulate in one array
+				int idx = (int)_sat_info_write_idx + y;
+				if (idx >= satellite_info_s::SAT_INFO_MAX_SATELLITES) { break; }
+
 				if (bufptr && *(++bufptr) != ',') { sat[y].svid = strtol(bufptr, &endp, 10); bufptr = endp; }
 
 				if (bufptr && *(++bufptr) != ',') { sat[y].elevation = strtol(bufptr, &endp, 10); bufptr = endp; }
@@ -823,17 +878,233 @@ int GPSDriverNMEA::handleMessage(int len)
 
 				if (bufptr && *(++bufptr) != ',') { sat[y].snr = strtol(bufptr, &endp, 10); bufptr = endp; }
 
-				_satellite_info->svid[y + (this_page_num - 1) * 4]      = sat[y].svid;
-				_satellite_info->used[y + (this_page_num - 1) * 4]      = (sat[y].snr > 0);
-				_satellite_info->snr[y + (this_page_num - 1) * 4]       = sat[y].snr;
-				_satellite_info->elevation[y + (this_page_num - 1) * 4] = sat[y].elevation;
-				_satellite_info->azimuth[y + (this_page_num - 1) * 4]   = sat[y].azimuth;
+				_satellite_info->svid[idx]      = sat[y].svid;
+				_satellite_info->used[idx]      = (sat[y].snr > 0);
+				_satellite_info->snr[idx]       = sat[y].snr;
+				_satellite_info->elevation[idx] = sat[y].elevation;
+				_satellite_info->azimuth[idx]   = sat[y].azimuth;
+			}
+			// Advance running write index; update count to total sats written so far
+			int written = (int)_sat_info_write_idx + end;
+			if (written > satellite_info_s::SAT_INFO_MAX_SATELLITES) {
+				written = satellite_info_s::SAT_INFO_MAX_SATELLITES;
+			}
+			_sat_info_write_idx = (uint8_t)written;
+			_satellite_info->count = _sat_info_write_idx;
+		}
+
+	} else if (memcmp(_rx_buffer + 3, "GSVH,", 5) == 0) {
+		/*
+		UM982-specific: GPGSVH = GNSS Satellites in View (slave/Head antenna)
+		Format identical to standard GPGSV. Section 7.2.7 of UM982 manual.
+		Used to monitor Antenna 2 (slave) health independently from Antenna 1.
+		*/
+		const bool is_ant2 = true;
+
+		int all_page_num = 0, this_page_num = 0, tot_sv_visible = 0;
+		struct gsv_sat {
+			int svid;
+			int elevation;
+			int azimuth;
+			int snr;
+		} sat[4] {};
+
+		// Parse from raw buffer — skip "$GPGSVS," or "$GPGSVS2," prefix
+		char *p = (char *)_rx_buffer;
+
+		while (*p && *p != ',') { p++; } // skip message name
+
+		if (*p == ',') { ++p; if (*p != ',') { all_page_num  = strtol(p, &endp, 10); p = endp; } }
+		if (*p == ',') { ++p; if (*p != ',') { this_page_num = strtol(p, &endp, 10); p = endp; } }
+		if (*p == ',') { ++p; if (*p != ',') { tot_sv_visible = strtol(p, &endp, 10); p = endp; } }
+
+		if ((this_page_num < 1) || (this_page_num > all_page_num)) {
+			return 0;
+		}
+
+		satellite_info_s *sinfo = is_ant2 ? &_satellite_info_ant2 : _satellite_info;
+
+		if (!sinfo) { return 0; }
+
+		if (this_page_num == 1) {
+			memset(sinfo->svid,      0, sizeof(sinfo->svid));
+			memset(sinfo->used,      0, sizeof(sinfo->used));
+			memset(sinfo->snr,       0, sizeof(sinfo->snr));
+			memset(sinfo->elevation, 0, sizeof(sinfo->elevation));
+			memset(sinfo->azimuth,   0, sizeof(sinfo->azimuth));
+		}
+
+		int end = (this_page_num == all_page_num)
+			  ? (tot_sv_visible - (this_page_num - 1) * 4)
+			  : 4;
+
+		if (this_page_num == all_page_num) {
+			sinfo->count     = (uint8_t)MIN(tot_sv_visible, (int)satellite_info_s::SAT_INFO_MAX_SATELLITES);
+			sinfo->timestamp = gps_absolute_time();
+
+			if (is_ant2) {
+				// Determine constellation index (0=GP 1=GL 2=GA 3=GB 4=GQ)
+				int gsvh_cidx = -1;
+				if      (memcmp(_rx_buffer, "$GP", 3) == 0) { gsvh_cidx = 0; }
+				else if (memcmp(_rx_buffer, "$GL", 3) == 0) { gsvh_cidx = 1; }
+				else if (memcmp(_rx_buffer, "$GA", 3) == 0) { gsvh_cidx = 2; }
+				else if (memcmp(_rx_buffer, "$GB", 3) == 0) { gsvh_cidx = 3; }
+				else if (memcmp(_rx_buffer, "$GQ", 3) == 0) { gsvh_cidx = 4; }
+
+				// Extract Signal ID (last field before '*')
+				int signal_id_h = 255;
+				{
+					const char *star = (const char *)memchr(_rx_buffer, '*', _rx_buffer_bytes + 1);
+					if (star) {
+						const char *q = star - 1;
+						while (q > (const char *)_rx_buffer && *q != ',') { --q; }
+						if (*q == ',') { signal_id_h = (int)strtol(q + 1, nullptr, 10); }
+					}
+				}
+
+				// Only update from lowest Signal ID per constellation to count physical sats once
+				if (gsvh_cidx >= 0 && signal_id_h <= _gsvh_min_sid[gsvh_cidx]) {
+					_gsvh_min_sid[gsvh_cidx] = (uint8_t)signal_id_h;
+					switch (gsvh_cidx) {
+					case 0: _sat_num_ant2_gpgsvh = tot_sv_visible; break;
+					case 1: _sat_num_ant2_glgsvh = tot_sv_visible; break;
+					case 2: _sat_num_ant2_gagsvh = tot_sv_visible; break;
+					case 3: _sat_num_ant2_gbgsvh = tot_sv_visible; break;
+					case 4: _sat_num_ant2_gqgsvh = tot_sv_visible; break;
+					}
+				}
+
+				_sat_num_ant2_gsvs = _sat_num_ant2_gpgsvh + _sat_num_ant2_glgsvh
+						     + _sat_num_ant2_gagsvh + _sat_num_ant2_gbgsvh + _sat_num_ant2_gqgsvh;
+
+				// Log Antenna 2 health every 10 s so it's visible in PX4 console/logs
+				gps_abstime now = gps_absolute_time();
+
+				if (now - _ant2_health_log_last > 10000000ULL) {
+					_ant2_health_log_last = now;
+
+					// Compute average SNR for Antenna 2
+					int snr_sum = 0, snr_count = 0;
+
+					for (int k = 0; k < sinfo->count; k++) {
+						if (sinfo->snr[k] > 0) { snr_sum += sinfo->snr[k]; snr_count++; }
+					}
+
+					const float avg_snr = (snr_count > 0) ? (float)snr_sum / snr_count : 0.f;
+				NMEA_UNUSED(avg_snr);
+				const float hdg_stddev = _unicore_parser.heading().heading_stddev_deg;
+				NMEA_UNUSED(hdg_stddev);
+					// GPS_WARN("UM982 Ant2: sats=%d(used=%d) avg_snr=%.0f fix=%d eph=%.2fm epv=%.2fm hdg_stddev=%.1fdeg",
+					// 	 _sat_num_ant2_gsvs, _ant2_sat_num,
+					// 	 (double)avg_snr,
+					// 	 _ant2_fix_quality,
+					// 	 (double)_ant2_eph, (double)_ant2_epv,
+					// 	 (double)hdg_stddev);
+				}
 			}
 		}
 
+		for (int y = 0; y < end; y++) {
+			int idx = y + (this_page_num - 1) * 4;
+
+			if (idx >= satellite_info_s::SAT_INFO_MAX_SATELLITES) { break; }
+
+			if (*p == ',') { ++p; if (*p != ',') { sat[y].svid      = strtol(p, &endp, 10); p = endp; } }
+			if (*p == ',') { ++p; if (*p != ',') { sat[y].elevation = strtol(p, &endp, 10); p = endp; } }
+			if (*p == ',') { ++p; if (*p != ',') { sat[y].azimuth   = strtol(p, &endp, 10); p = endp; } }
+			if (*p == ',') { ++p; if (*p != ',') { sat[y].snr       = strtol(p, &endp, 10); p = endp; } }
+
+			sinfo->svid[idx]      = sat[y].svid;
+			sinfo->used[idx]      = (sat[y].snr > 0);
+			sinfo->snr[idx]       = sat[y].snr;
+			sinfo->elevation[idx] = sat[y].elevation;
+			sinfo->azimuth[idx]   = sat[y].azimuth;
+		}
+		_nmea_rate_gsvh.count++;
+
+	} else if ((memcmp(_rx_buffer + 3, "GGAH,", 5) == 0) && (fieldCount >= 14)) {
+		/*
+		GPGGAH — GGA for Slave Antenna (section 7.2.1)
+		Format identical to standard GPGGA.
+		We only extract fix_quality and num_of_sv to track Ant2 status.
+		*/
+		double utc_time = 0.0;
+		double lat = 0.0, lon = 0.0;
+		float alt = 0.f, geoid_h = 0.f, hdop_h = 99.9f, dgps_age_h = NAN;
+		int fix_quality_h = 0, num_of_sv_h = 0;
+		char ns_h = '?', ew_h = '?';
+		NMEA_UNUSED(utc_time); NMEA_UNUSED(lat); NMEA_UNUSED(lon);
+		NMEA_UNUSED(alt); NMEA_UNUSED(geoid_h); NMEA_UNUSED(hdop_h);
+		NMEA_UNUSED(dgps_age_h); NMEA_UNUSED(ns_h); NMEA_UNUSED(ew_h);
+		++bufptr; // GGAH is 6-char type, advance past extra char to align with first comma
+
+		if (bufptr && *(++bufptr) != ',') { utc_time     = strtod(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { lat          = strtod(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { ns_h         = *(bufptr++); }
+		if (bufptr && *(++bufptr) != ',') { lon          = strtod(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { ew_h         = *(bufptr++); }
+		if (bufptr && *(++bufptr) != ',') { fix_quality_h = strtol(bufptr, &endp, 10); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { num_of_sv_h  = strtol(bufptr, &endp, 10); bufptr = endp; }
+
+		_ant2_fix_quality = fix_quality_h;
+		_ant2_sat_num     = num_of_sv_h;
+		_nmea_rate_ggah.count++;
+
+	} else if ((memcmp(_rx_buffer + 3, "GSTH,", 5) == 0) && (fieldCount == 8)) {
+		/*
+		GPGSTH — GST for Slave Antenna (section 7.2.6)
+		Format identical to standard GPGST.
+		Provides eph/epv for Ant2 — if much larger than Ant1 → slave obstructed.
+		*/
+		double utc_time_h = 0.0;
+		float lat_err_h = 0.f, lon_err_h = 0.f, alt_err_h = 0.f;
+		float min_err_h = 0.f, maj_err_h = 0.f, deg_h = 0.f, rms_h = 0.f;
+		NMEA_UNUSED(utc_time_h); NMEA_UNUSED(min_err_h);
+		NMEA_UNUSED(maj_err_h); NMEA_UNUSED(deg_h); NMEA_UNUSED(rms_h);
+		++bufptr; // GSTH is 6-char type, advance past extra char to align with first comma
+
+		if (bufptr && *(++bufptr) != ',') { utc_time_h = strtod(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { rms_h      = strtof(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { maj_err_h  = strtof(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { min_err_h  = strtof(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { deg_h      = strtof(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { lat_err_h  = strtof(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { lon_err_h  = strtof(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { alt_err_h  = strtof(bufptr, &endp); bufptr = endp; }
+
+		_ant2_eph = sqrtf(lat_err_h * lat_err_h + lon_err_h * lon_err_h);
+		_ant2_epv = alt_err_h;
+		_nmea_rate_gsth.count++;
+
+	} else if ((memcmp(_rx_buffer + 3, "GSAH,", 5) == 0) && (fieldCount >= 17)) {
+		/*
+		GPGSAH — GSA for Slave Antenna (section 7.2.5)
+		Format identical to standard GPGSA.
+		fix_mode=1 on Ant2 while Ant1=3 → heading solution unreliable.
+		*/
+		char m_pos_h = ' ';
+		int fix_mode_h = 0;
+		int sat_id_h[12] {0};
+		float pdop_h = 99.9f, hdop_h = 99.9f, vdop_h = 99.9f;
+		NMEA_UNUSED(m_pos_h); NMEA_UNUSED(sat_id_h);
+		NMEA_UNUSED(pdop_h); NMEA_UNUSED(hdop_h); NMEA_UNUSED(vdop_h);
+		++bufptr; // GSAH is 6-char type, advance past extra char to align with first comma
+
+		if (bufptr && *(++bufptr) != ',') { m_pos_h   = *(bufptr++); }
+		if (bufptr && *(++bufptr) != ',') { fix_mode_h = strtol(bufptr, &endp, 10); bufptr = endp; }
+
+		for (int y = 0; y < 12; y++) {
+			if (bufptr && *(++bufptr) != ',') { sat_id_h[y] = strtol(bufptr, &endp, 10); bufptr = endp; }
+		}
+
+		if (bufptr && *(++bufptr) != ',') { pdop_h = strtof(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { hdop_h = strtof(bufptr, &endp); bufptr = endp; }
+		if (bufptr && *(++bufptr) != ',') { vdop_h = strtof(bufptr, &endp); bufptr = endp; }
+
+		_ant2_fix_mode = fix_mode_h;
+		_nmea_rate_gsah.count++;
 
 	} else if ((memcmp(_rx_buffer + 3, "VTG,", 4) == 0) && (fieldCount >= 8)) {
-
 		/*$GNVTG,,T,,M,0.683,N,1.265,K*30
 		  $GNVTG,,T,,M,0.780,N,1.445,K*33
 
@@ -907,14 +1178,26 @@ int GPSDriverNMEA::handleMessage(int len)
 		NMEA_DEBUG("Unable to parse %c%c%c%c message", _rx_buffer[3], _rx_buffer[4], _rx_buffer[5], _rx_buffer[6]);
 	}
 
+	// satellites_used = in-solution count from GGA field 7 (≤28 on UM982)
+	// satellites_visible = raw sum of all constellations × all signal bands from GSV (can be 40+)
+	_sat_num_gsv = _sat_num_gpgsv + _sat_num_glgsv + _sat_num_gagsv
+		       + _sat_num_gbgsv + _sat_num_gqgsv + _sat_num_bdgsv;
+
 	if (_sat_num_gga > 0) {
 		_gps_position->satellites_used = _sat_num_gga;
 
-	} else if (_SVNUM_received && _SVINFO_received && _FIX_received) {
+	} else if (_sat_num_gsv > 0) {
+		_gps_position->satellites_used = _sat_num_gsv;
 
-		_sat_num_gsv = _sat_num_gpgsv + _sat_num_glgsv + _sat_num_gagsv
-			       + _sat_num_gbgsv + _sat_num_bdgsv;
+	} else if (_SVNUM_received && _SVINFO_received && _FIX_received) {
 		_gps_position->satellites_used = MAX(_sat_num_gns, _sat_num_gsv);
+	}
+
+	if (_sat_num_gsv_raw > 0) {
+		_gps_position->satellites_visible = (uint8_t)MIN((int)_sat_num_gsv_raw, 255);
+
+	} else if (_sat_num_gsv > 0) {
+		_gps_position->satellites_visible = _sat_num_gsv;
 	}
 
 	if (_VEL_received && _POS_received) {
@@ -961,6 +1244,7 @@ int GPSDriverNMEA::receive(unsigned timeout)
 					// Don't mark this as handled, just publish it with position later.
 
 					_unicore_heading_received_last = gps_absolute_time();
+					_nmea_rate_head.count++;
 
 					// Unicore seems to publish heading and standard deviation of 0
 					// to signal that it has not initialized the heading yet.
@@ -992,9 +1276,9 @@ int GPSDriverNMEA::receive(unsigned timeout)
 					// Receiving this message tells us that we are talking to a UM982. If
 					// UNIHEADINGA is not configured by default, we request it now.
 
-					if (gps_absolute_time() - _unicore_heading_received_last > 1000000) {
-						request_unicore_messages();
-					}
+					// if (gps_absolute_time() - _unicore_heading_received_last > 1000000) {
+					// 	request_unicore_messages();
+					// }
 
 					_gps_position->vel_m_s = _unicore_parser.agrica().velocity_m_s;
 					_gps_position->vel_n_m_s = _unicore_parser.agrica().velocity_north_m_s;
@@ -1013,9 +1297,45 @@ int GPSDriverNMEA::receive(unsigned timeout)
 					_gps_position->vel_ned_valid = true;
 					_VEL_received = true;
 					_rate_count_vel++;
+					_nmea_rate_agrica.count++;
 
 					// We don't specifically publish this but it's just added with the next position
 					// update.
+				}
+			}
+
+			// Print per-message NMEA rates every 10 s
+			{
+				gps_abstime _now = gps_absolute_time();
+				if (_now - _nmea_rate_last_print > 10000000ULL) {
+					const float dt = (_nmea_rate_last_print > 0)
+						? (_now - _nmea_rate_last_print) * 1e-6f : 10.f;
+					_nmea_rate_gga.rate   = _nmea_rate_gga.count   / dt;
+					_nmea_rate_agrica.rate = _nmea_rate_agrica.count / dt;
+					_nmea_rate_head.rate  = _nmea_rate_head.count  / dt;
+					_nmea_rate_gst.rate   = _nmea_rate_gst.count   / dt;
+					_nmea_rate_gsa.rate   = _nmea_rate_gsa.count   / dt;
+					_nmea_rate_rmc.rate   = _nmea_rate_rmc.count   / dt;
+					_nmea_rate_zda.rate   = _nmea_rate_zda.count   / dt;
+					_nmea_rate_gsv.rate   = _nmea_rate_gsv.count   / dt;
+					_nmea_rate_gsvh.rate  = _nmea_rate_gsvh.count  / dt;
+					_nmea_rate_ggah.rate  = _nmea_rate_ggah.count  / dt;
+					_nmea_rate_gsth.rate  = _nmea_rate_gsth.count  / dt;
+					_nmea_rate_gsah.rate  = _nmea_rate_gsah.count  / dt;
+					// GPS_WARN("UM982 NMEA rates(Hz): GGA=%.1f AGRICA=%.1f HEADING=%.1f GST=%.1f GSA=%.1f RMC=%.1f ZDA=%.1f GSV=%.1f",
+					// 	(double)_nmea_rate_gga.rate, (double)_nmea_rate_agrica.rate,
+					// 	(double)_nmea_rate_head.rate, (double)_nmea_rate_gst.rate,
+					// 	(double)_nmea_rate_gsa.rate, (double)_nmea_rate_rmc.rate,
+					// 	(double)_nmea_rate_zda.rate, (double)_nmea_rate_gsv.rate);
+					// GPS_WARN("UM982 NMEA rates(Hz): GSVH=%.1f GGAH=%.1f GSTH=%.1f GSAH=%.1f",
+					// 	(double)_nmea_rate_gsvh.rate, (double)_nmea_rate_ggah.rate,
+					// 	(double)_nmea_rate_gsth.rate, (double)_nmea_rate_gsah.rate);
+					// Reset counters
+					_nmea_rate_gga.count = _nmea_rate_agrica.count = _nmea_rate_head.count = 0;
+					_nmea_rate_gst.count = _nmea_rate_gsa.count = _nmea_rate_rmc.count = 0;
+					_nmea_rate_zda.count = _nmea_rate_gsv.count = _nmea_rate_gsvh.count = 0;
+					_nmea_rate_ggah.count = _nmea_rate_gsth.count = _nmea_rate_gsah.count = 0;
+					_nmea_rate_last_print = _now;
 				}
 			}
 
@@ -1029,6 +1349,46 @@ int GPSDriverNMEA::receive(unsigned timeout)
 			return -1;
 		}
 	}
+}
+
+void GPSDriverNMEA::printDriverStatus()
+{
+	// Per-message NMEA rates (computed from last 10 s window)
+	PX4_INFO("--- UM982 NMEA message rates ---");
+	PX4_INFO("  Ant1: GGA=%.1f Hz  AGRICA=%.1f Hz  HEADING=%.1f Hz",
+		 (double)_nmea_rate_gga.rate,
+		 (double)_nmea_rate_agrica.rate,
+		 (double)_nmea_rate_head.rate);
+	PX4_INFO("  Ant1: GST=%.1f Hz  GSA=%.1f Hz(x4 constellations)  RMC=%.1f Hz  ZDA=%.1f Hz  GSV=%.1f Hz",
+		 (double)_nmea_rate_gst.rate,
+		 (double)_nmea_rate_gsa.rate,
+		 (double)_nmea_rate_rmc.rate,
+		 (double)_nmea_rate_zda.rate,
+		 (double)_nmea_rate_gsv.rate);
+	PX4_INFO("  Ant2: GSVH=%.1f Hz  GGAH=%.1f Hz  GSTH=%.1f Hz  GSAH=%.1f Hz",
+		 (double)_nmea_rate_gsvh.rate,
+		 (double)_nmea_rate_ggah.rate,
+		 (double)_nmea_rate_gsth.rate,
+		 (double)_nmea_rate_gsah.rate);
+	// visible  = satellites locked by receiver (GPGSV, all constellations)
+	// in_solution = satellites actually used to compute position (GGA field 7)
+	// fix  = 0=NoFix 3=3D 4=DGPS 5=FloatRTK 6=FixedRTK
+	int sat_visible = _sat_num_gpgsv + _sat_num_glgsv + _sat_num_gagsv
+			  + _sat_num_gbgsv + _sat_num_gqgsv + _sat_num_bdgsv;
+	PX4_INFO("  Ant1: visible(raw)=%d visible(phys)=%d in_solution=%d fix=%d eph=%.2fm epv=%.2fm",
+		 (int)_sat_num_gsv_raw,
+		 sat_visible,
+		 (int)_sat_num_gga,
+		 _gps_position->fix_type,
+		 (double)_gps_position->eph,
+		 (double)_gps_position->epv);
+	// visible     = satellites locked by Ant2 (GPGSVH, GPS-only band)
+	// in_solution = satellites used in Ant2 position (GPGGAH field 7)
+	// fix  = 0=NoFix 1=GPSFix 2=DGPS 4=FixedRTK 5=FloatRTK
+	PX4_INFO("  Ant2: visible=%d in_solution=%d fix=%d eph=%.2fm epv=%.2fm",
+		 _sat_num_ant2_gsvs, _ant2_sat_num,
+		 _ant2_fix_quality,
+		 (double)_ant2_eph, (double)_ant2_epv);
 }
 
 void GPSDriverNMEA::handleHeading(float heading_deg, float heading_stddev_deg)
@@ -1052,40 +1412,86 @@ void GPSDriverNMEA::handleHeading(float heading_deg, float heading_stddev_deg)
 
 void GPSDriverNMEA::request_unicore_messages()
 {
-	// Configure position messages on serial port. Don't save it though.
+	// Configure UM982 messages on COM1 for drone use.
+	// UM982 does not support THISPORT — port must be specified explicitly.
+	// Assumes PX4 is connected to COM1 (most common wiring). Does NOT save —
+	// the receiver will revert to saved config on reboot, and PX4 re-sends
+	// this every time it detects a UM982 (via AGRICA).
+
 	{
-		// position
-		uint8_t buf[] = "GPGGA COM1 0.2\r\n";
+		// position @ 10 Hz — feeds EKF2 position fusion
+		uint8_t buf[] = "GPGGA COM1 0.1\r\n";
 		write(buf, sizeof(buf) - 1);
 	}
 
 	{
-		// velocity
-		uint8_t buf[] = "UNIAGRICA COM1 0.2\r\n";
+		// velocity (NED + stddev) @ 10 Hz — replaces RMC/VTG for Unicore,
+		// provides vel_d_m_s and velocity stddev which standard NMEA lacks
+		uint8_t buf[] = "AGRICA COM1 0.1\r\n";
 		write(buf, sizeof(buf) - 1);
 	}
 
 	{
-		// heading
-		uint8_t buf[] = "UNIHEADINGA COM1 0.2\r\n";
+		// dual-antenna heading @ 10 Hz — critical for yaw fusion on takeoff/landing
+		uint8_t buf[] = "UNIHEADINGA COM1 0.1\r\n";
 		write(buf, sizeof(buf) - 1);
 	}
 
 	{
-		// eph, epv
-		uint8_t buf[] = "GPGST COM1 1.0\r\n";
+		// position error stddev (eph/epv) @ 10 Hz — used by EKF2 to weight GPS
+		uint8_t buf[] = "GPGST COM1 0.1\r\n";
 		write(buf, sizeof(buf) - 1);
 	}
 
 	{
-		// vdop
-		uint8_t buf[] = "GPGSA COM1 1.0\r\n";
+		// hdop/vdop @ 10 Hz — needed for fix_type validation in EKF2
+		uint8_t buf[] = "GPGSA COM1 0.1\r\n";
 		write(buf, sizeof(buf) - 1);
 	}
 
 	{
-		// time
+		// time sync (speed/course) @ 1 Hz — UTC clock fallback, low rate OK
 		uint8_t buf[] = "GPRMC COM1 1.0\r\n";
+		write(buf, sizeof(buf) - 1);
+	}
+
+	{
+		// UTC date/time @ 1 Hz — parsed by PX4 for precise time_utc_usec
+		uint8_t buf[] = "GPZDA COM1 1.0\r\n";
+		write(buf, sizeof(buf) - 1);
+	}
+
+	{
+		// Ant1: all tracked satellites across all constellations @ 1 Hz
+		// GNGSV triggers multi-constellation output (GPGSV+GLGSV+GAGSV+GBGSV+GQGSV)
+		uint8_t buf[] = "GNGSV COM1 1.0\r\n";
+		write(buf, sizeof(buf) - 1);
+	}
+
+	{
+		// Ant2: satellite SNR @ 1 Hz — section 7.2.7
+		uint8_t buf[] = "GPGSVH COM1 1.0\r\n";
+		write(buf, sizeof(buf) - 1);
+	}
+
+	{
+		// Ant2: fix quality + num SVs @ 1 Hz — section 7.2.1
+		// Used to compare Ant2 fix quality vs Ant1 and detect slave antenna failure
+		uint8_t buf[] = "GPGGAH COM1 1.0\r\n";
+		write(buf, sizeof(buf) - 1);
+	}
+
+	{
+		// Ant2: position error stddev (eph/epv) @ 1 Hz — section 7.2.6
+		// If Ant2 eph >> Ant1 eph → slave antenna obstructed or misplaced
+		uint8_t buf[] = "GPGSTH COM1 1.0\r\n";
+		write(buf, sizeof(buf) - 1);
+	}
+
+	{
+		// Ant2: DOP + fix mode @ 1 Hz — section 7.2.5
+		// fix_mode=1 on Ant2 while Ant1=3 → heading unreliable
+		uint8_t buf[] = "GPGSAH COM1 1.0\r\n";
 		write(buf, sizeof(buf) - 1);
 	}
 }
@@ -1189,12 +1595,18 @@ int GPSDriverNMEA::configure(unsigned &baudrate, const GPSConfig &config)
 	// If a baudrate is defined, we test this first
 	if (baudrate > 0) {
 		setBaudrate(baudrate);
+		// Send Unicore messages immediately in case this is a UM982 that needs
+		// to be configured to start streaming NMEA output.
+		// request_unicore_messages();
+		// gps_usleep(200000); // 200 ms for receiver to process commands and start streaming
 		decodeInit();
-		int ret = receive(400);
+		int ret = receive(600);
 		gps_usleep(2000);
 
 		// If a valid POS message is received we have GPS
 		if (_POS_received || ret > 0) {
+			// Send again to ensure continuous streaming after configure
+			// request_unicore_messages();
 			return 0;
 		}
 	}
@@ -1211,12 +1623,17 @@ int GPSDriverNMEA::configure(unsigned &baudrate, const GPSConfig &config)
 
 		NMEA_DEBUG("baudrate set to %i", test_baudrate);
 
+		// Send Unicore messages at each baudrate to trigger output from UM982
+		request_unicore_messages();
+		gps_usleep(200000); // 200 ms for receiver to process commands and start streaming
 		decodeInit();
-		int ret = receive(400);
+		int ret = receive(600);
 		gps_usleep(2000);
 
 		// If a valid POS message is received we have GPS
 		if (_POS_received || ret > 0) {
+			// Send again to ensure continuous streaming after configure
+			request_unicore_messages();
 			return 0;
 		}
 	}
