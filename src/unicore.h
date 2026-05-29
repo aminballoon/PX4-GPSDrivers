@@ -45,6 +45,7 @@ public:
 		WrongStructure,
 		GotHeading,
 		GotAgrica,
+		GotRtcmStatus,
 		UnknownSentence,
 	};
 
@@ -66,6 +67,12 @@ public:
 		float stddev_velocity_up_m_s;
 	};
 
+	struct RtcmStatus {
+		// First field after ';'. On UM982 this is the count of distinct
+		// RTCM3 message types received in the current reporting window.
+		uint16_t num_msg_types;
+	};
+
 	Heading heading() const
 	{
 		return _heading;
@@ -76,6 +83,11 @@ public:
 		return _agrica;
 	}
 
+	RtcmStatus rtcmStatus() const
+	{
+		return _rtcm_status;
+	}
+
 	bool agricaValid() const { return _agrica_valid; }
 
 private:
@@ -83,8 +95,10 @@ private:
 	bool crcCorrect() const;
 	bool isHeading() const;
 	bool isAgrica() const;
+	bool isRtcmStatus() const;
 	bool extractHeading();
 	bool extractAgrica();
+	bool extractRtcmStatus();
 
 	// We have seen buffers with 540 bytes for AGRICA.
 	char _buffer[600];
@@ -100,6 +114,7 @@ private:
 
 	Heading _heading{};
 	Agrica _agrica{};
+	RtcmStatus _rtcm_status{};
 
 	bool _agrica_valid{false};
 };

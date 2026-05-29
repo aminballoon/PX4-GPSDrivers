@@ -1276,6 +1276,11 @@ int GPSDriverNMEA::receive(unsigned timeout)
 
 					// We don't specifically publish this but it's just added with the next position
 					// update.
+
+				} else if (result == UnicoreParser::Result::GotRtcmStatus) {
+					_unicore_rtcm_status_last = gps_absolute_time();
+					_unicore_rtcm_msg_types = _unicore_parser.rtcmStatus().num_msg_types;
+					_nmea_rate_rtcmstatus.count++;
 				}
 			}
 
@@ -1297,10 +1302,12 @@ int GPSDriverNMEA::receive(unsigned timeout)
 					_nmea_rate_ggah.rate  = _nmea_rate_ggah.count  / dt;
 					_nmea_rate_gsth.rate  = _nmea_rate_gsth.count  / dt;
 					_nmea_rate_gsah.rate  = _nmea_rate_gsah.count  / dt;
+					_nmea_rate_rtcmstatus.rate = _nmea_rate_rtcmstatus.count / dt;
 					_nmea_rate_gga.count = _nmea_rate_agrica.count = _nmea_rate_head.count = 0;
 					_nmea_rate_gst.count = _nmea_rate_gsa.count = _nmea_rate_rmc.count = 0;
 					_nmea_rate_zda.count = _nmea_rate_gsv.count = _nmea_rate_gsvh.count = 0;
 					_nmea_rate_ggah.count = _nmea_rate_gsth.count = _nmea_rate_gsah.count = 0;
+					_nmea_rate_rtcmstatus.count = 0;
 					_nmea_rate_last_print = _now;
 				}
 			}
@@ -1336,6 +1343,21 @@ void GPSDriverNMEA::printDriverStatus()
 		 (double)_nmea_rate_ggah.rate,
 		 (double)_nmea_rate_gsth.rate,
 		 (double)_nmea_rate_gsah.rate);
+
+	// RTCM link health: age of last UNIRTCMSTATUSA + number of RTCM3 message
+	// types in the report. Fresh status (age < 2 s) → base/NTRIP link is live;
+	// >5 s typically means RTK will downgrade from FIXED → FLOAT/DGPS.
+	if (_unicore_rtcm_status_last > 0) {
+		const float age_s = (gps_absolute_time() - _unicore_rtcm_status_last) * 1e-6f;
+		PX4_INFO("  RTCM: rate=%.1f Hz  age=%.1fs  msg_types=%u",
+			 (double)_nmea_rate_rtcmstatus.rate,
+			 (double)age_s,
+			 (unsigned)_unicore_rtcm_msg_types);
+
+	} else {
+		PX4_INFO("  RTCM: no UNIRTCMSTATUSA received");
+	}
+
 	// visible  = satellites locked by receiver (GPGSV, all constellations)
 	// in_solution = satellites actually used to compute position (GGA field 7)
 	// fix  = 0=NoFix 3=3D 4=DGPS 5=FloatRTK 6=FixedRTK
@@ -1458,6 +1480,13 @@ void GPSDriverNMEA::request_unicore_messages()
 		// Ant2: DOP + fix mode @ 1 Hz — section 7.2.5
 		// fix_mode=1 on Ant2 while Ant1=3 → heading unreliable
 		uint8_t buf[] = "GPGSAH COM1 1.0\r\n";
+		write(buf, sizeof(buf) - 1);
+	}
+
+	{
+		// RTCM injection health @ 1 Hz — message arrival = link alive.
+		// Used to detect base-station / NTRIP dropout during RTK ops.
+		uint8_t buf[] = "UNIRTCMSTATUSA COM1 1.0\r\n";
 		write(buf, sizeof(buf) - 1);
 	}
 }

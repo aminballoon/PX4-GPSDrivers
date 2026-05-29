@@ -128,7 +128,13 @@ private:
 	NmeaMsgRate _nmea_rate_ggah {};
 	NmeaMsgRate _nmea_rate_gsth {};
 	NmeaMsgRate _nmea_rate_gsah {};
+	NmeaMsgRate _nmea_rate_rtcmstatus {};
 	gps_abstime _nmea_rate_last_print {0};
+
+	// UNIRTCMSTATUSA: tracks RTCM correction link health.
+	// _unicore_rtcm_status_last == 0 → never received; check age vs now for staleness.
+	gps_abstime _unicore_rtcm_status_last {0};
+	uint16_t    _unicore_rtcm_msg_types {0};
 	double _last_POS_timeUTC{0};
 	double _last_VEL_timeUTC{0};
 	uint64_t _last_timestamp_time{0};

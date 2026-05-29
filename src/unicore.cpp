@@ -98,6 +98,16 @@ UnicoreParser::Result UnicoreParser::parseChar(char c)
 					return Result::WrongStructure;
 				}
 
+			} else if (isRtcmStatus()) {
+				if (extractRtcmStatus()) {
+					reset();
+					return Result::GotRtcmStatus;
+
+				} else {
+					reset();
+					return Result::WrongStructure;
+				}
+
 			} else {
 				reset();
 				return Result::UnknownSentence;
@@ -134,6 +144,13 @@ bool UnicoreParser::isHeading() const
 bool UnicoreParser::isAgrica() const
 {
 	const char header[] = "AGRICA";
+
+	return strncmp(header, _buffer, strlen(header)) == 0;
+}
+
+bool UnicoreParser::isRtcmStatus() const
+{
+	const char header[] = "UNIRTCMSTATUSA";
 
 	return strncmp(header, _buffer, strlen(header)) == 0;
 }
@@ -231,4 +248,43 @@ bool UnicoreParser::extractAgrica()
 	}
 
 	return false;
+}
+
+bool UnicoreParser::extractRtcmStatus()
+{
+	// UM982 UNIRTCMSTATUSA body (after ';'):
+	//   <num_msg_types>, [<rtcm_id>,<count>]..., <ref_station_id>, <flag>
+	// We only extract num_msg_types — diff_age field position is firmware-
+	// dependent, so RTCM link health is tracked by message arrival rate
+	// in the NMEA driver instead.
+	//
+	// Some firmware variants put a status string ("RTCM_OK") in field 0;
+	// in that case strtol leaves num_msg_types at 0, but we still return
+	// true so the NMEA driver records the message arrival.
+
+	char *ptr = strchr(_buffer, ';');
+
+	if (ptr == nullptr) {
+		return false;
+	}
+
+	++ptr; // move past ';' to first body field
+
+	char *endp = nullptr;
+	long n = strtol(ptr, &endp, 10);
+
+	if (endp == ptr) {
+		_rtcm_status.num_msg_types = 0;
+
+	} else if (n < 0) {
+		_rtcm_status.num_msg_types = 0;
+
+	} else if (n > UINT16_MAX) {
+		_rtcm_status.num_msg_types = UINT16_MAX;
+
+	} else {
+		_rtcm_status.num_msg_types = (uint16_t)n;
+	}
+
+	return true;
 }
