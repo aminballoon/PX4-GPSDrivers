@@ -103,7 +103,6 @@ private:
 	int _sat_num_ant2_gagsvh{0}; // Galileo
 	int _sat_num_ant2_gbgsvh{0}; // BeiDou ($GB prefix)
 	int _sat_num_ant2_gqgsvh{0}; // QZSS
-	gps_abstime _ant2_health_log_last {0};
 
 	// Ant2 auxiliary fields from GPGGAH / GPGSTH / GPGSAH
 	uint8_t _ant2_fix_quality {0};

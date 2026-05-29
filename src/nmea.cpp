@@ -976,31 +976,6 @@ int GPSDriverNMEA::handleMessage(int len)
 
 				_sat_num_ant2_gsvs = _sat_num_ant2_gpgsvh + _sat_num_ant2_glgsvh
 						     + _sat_num_ant2_gagsvh + _sat_num_ant2_gbgsvh + _sat_num_ant2_gqgsvh;
-
-				// Log Antenna 2 health every 10 s so it's visible in PX4 console/logs
-				gps_abstime now = gps_absolute_time();
-
-				if (now - _ant2_health_log_last > 10000000ULL) {
-					_ant2_health_log_last = now;
-
-					// Compute average SNR for Antenna 2
-					int snr_sum = 0, snr_count = 0;
-
-					for (int k = 0; k < sinfo->count; k++) {
-						if (sinfo->snr[k] > 0) { snr_sum += sinfo->snr[k]; snr_count++; }
-					}
-
-					const float avg_snr = (snr_count > 0) ? (float)snr_sum / snr_count : 0.f;
-				NMEA_UNUSED(avg_snr);
-				const float hdg_stddev = _unicore_parser.heading().heading_stddev_deg;
-				NMEA_UNUSED(hdg_stddev);
-					// GPS_WARN("UM982 Ant2: sats=%d(used=%d) avg_snr=%.0f fix=%d eph=%.2fm epv=%.2fm hdg_stddev=%.1fdeg",
-					// 	 _sat_num_ant2_gsvs, _ant2_sat_num,
-					// 	 (double)avg_snr,
-					// 	 _ant2_fix_quality,
-					// 	 (double)_ant2_eph, (double)_ant2_epv,
-					// 	 (double)hdg_stddev);
-				}
 			}
 		}
 
@@ -1276,9 +1251,9 @@ int GPSDriverNMEA::receive(unsigned timeout)
 					// Receiving this message tells us that we are talking to a UM982. If
 					// UNIHEADINGA is not configured by default, we request it now.
 
-					// if (gps_absolute_time() - _unicore_heading_received_last > 1000000) {
-					// 	request_unicore_messages();
-					// }
+					if (gps_absolute_time() - _unicore_heading_received_last > 1000000) {
+						request_unicore_messages();
+					}
 
 					_gps_position->vel_m_s = _unicore_parser.agrica().velocity_m_s;
 					_gps_position->vel_n_m_s = _unicore_parser.agrica().velocity_north_m_s;
@@ -1322,15 +1297,6 @@ int GPSDriverNMEA::receive(unsigned timeout)
 					_nmea_rate_ggah.rate  = _nmea_rate_ggah.count  / dt;
 					_nmea_rate_gsth.rate  = _nmea_rate_gsth.count  / dt;
 					_nmea_rate_gsah.rate  = _nmea_rate_gsah.count  / dt;
-					// GPS_WARN("UM982 NMEA rates(Hz): GGA=%.1f AGRICA=%.1f HEADING=%.1f GST=%.1f GSA=%.1f RMC=%.1f ZDA=%.1f GSV=%.1f",
-					// 	(double)_nmea_rate_gga.rate, (double)_nmea_rate_agrica.rate,
-					// 	(double)_nmea_rate_head.rate, (double)_nmea_rate_gst.rate,
-					// 	(double)_nmea_rate_gsa.rate, (double)_nmea_rate_rmc.rate,
-					// 	(double)_nmea_rate_zda.rate, (double)_nmea_rate_gsv.rate);
-					// GPS_WARN("UM982 NMEA rates(Hz): GSVH=%.1f GGAH=%.1f GSTH=%.1f GSAH=%.1f",
-					// 	(double)_nmea_rate_gsvh.rate, (double)_nmea_rate_ggah.rate,
-					// 	(double)_nmea_rate_gsth.rate, (double)_nmea_rate_gsah.rate);
-					// Reset counters
 					_nmea_rate_gga.count = _nmea_rate_agrica.count = _nmea_rate_head.count = 0;
 					_nmea_rate_gst.count = _nmea_rate_gsa.count = _nmea_rate_rmc.count = 0;
 					_nmea_rate_zda.count = _nmea_rate_gsv.count = _nmea_rate_gsvh.count = 0;
@@ -1595,18 +1561,12 @@ int GPSDriverNMEA::configure(unsigned &baudrate, const GPSConfig &config)
 	// If a baudrate is defined, we test this first
 	if (baudrate > 0) {
 		setBaudrate(baudrate);
-		// Send Unicore messages immediately in case this is a UM982 that needs
-		// to be configured to start streaming NMEA output.
-		// request_unicore_messages();
-		// gps_usleep(200000); // 200 ms for receiver to process commands and start streaming
 		decodeInit();
 		int ret = receive(600);
 		gps_usleep(2000);
 
 		// If a valid POS message is received we have GPS
 		if (_POS_received || ret > 0) {
-			// Send again to ensure continuous streaming after configure
-			// request_unicore_messages();
 			return 0;
 		}
 	}
